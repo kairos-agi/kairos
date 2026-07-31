@@ -378,7 +378,11 @@ class SelfAttention(nn.Module):
             q = rearrange(q, "b (n d l) c -> (b d) (n l) c", l=L, d=dilated_length)
             k = rearrange(k, "b (n d l) c -> (b d) (n l) c", l=L, d=dilated_length)
             v = rearrange(v, "b (n d l) c -> (b d) (n l) c", l=L, d=dilated_length)
-            x = self.attn(q, k, v, window_size=(L*self.window_size, L*self.window_size))
+
+        # Attention must run whether or not the dilated path is taken; keeping it
+        # inside the branch above left x as the raw input for dilated_length == 1
+        # layers, turning self-attention into a plain linear projection.
+        x = self.attn(q, k, v, window_size=(L*self.window_size, L*self.window_size))
 
         out = self.o(x)
         if use_dilated:
