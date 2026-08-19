@@ -3,7 +3,7 @@ import torch.distributed as dist
 
 class SimpleParallelState:
     """
-    A minimal `parallel_state` shim for open-source inference code.
+    A `parallel_state` shim used by the inference code.
 
     This helper defines how different distributed process groups are used in this repo:
 

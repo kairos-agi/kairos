@@ -10,12 +10,17 @@ if not hasattr(transformers.activations, "PytorchGELUTanh"):
     transformers.activations.PytorchGELUTanh = transformers.activations.GELUActivation
 
 class QwenVLTextEncoder(nn.Module):
-    def __init__(self, dtype=torch.bfloat16, device='cuda', from_pretrained=''):
+    def __init__(self, 
+    dtype=torch.bfloat16, 
+    device='cuda',
+    from_pretrained='',
+    max_pixels=448 * 448,
+    ):
         super().__init__()
         self.tokenizer_max_length = 1024
         self.prompt_template_encode_start_idx = 97
         self.prompt_template_encode_post_len = 5
-        
+        self.max_pixels = max_pixels
         if from_pretrained:
             print('Loading text_encoder from from_pretrained:', from_pretrained)
             text_encoder_path = f'{from_pretrained}'
@@ -50,7 +55,7 @@ class QwenVLTextEncoder(nn.Module):
         self.text_encoder.to(device=device, dtype=dtype)
 
         # for vision-language embed
-        self.processor = AutoProcessor.from_pretrained(processor_path)
+        self.processor = AutoProcessor.from_pretrained(processor_path, max_pixels=max_pixels)
 
         self.system_prompt = (
             "Describe the video by detailing the following aspects: "

@@ -1,3 +1,4 @@
+import copy
 import torch, warnings, glob, os, types
 import numpy as np
 from PIL import Image
@@ -38,12 +39,20 @@ from kairos.modules.dits.mot_mask_utils import build_mot_attention_mask_info_dic
 @KAIROS_PROCESSOR.register_module()
 class KairosEmbodiedWAMPipeline(BasePipeline):
 
-    def __init__(self, device="cuda", torch_dtype=torch.bfloat16, vram_management_enabled = False, text_encoder_config=dict()):
+    def __init__(
+        self,
+        device="cuda",
+        torch_dtype=torch.bfloat16,
+        vram_management_enabled=False,
+        text_encoder_config=None,
+    ):
         super().__init__(
             device=device, torch_dtype=torch_dtype,
             height_division_factor=16, width_division_factor=16, time_division_factor=4, time_division_remainder=1
         )
-        self.text_encoder_config = text_encoder_config
+        self.vram_management_enabled = vram_management_enabled
+        self.text_encoder_config = copy.deepcopy(text_encoder_config or {})
+        self.loss_video_alpha = 1.0
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True,
                                             exponential_shift=True, exponential_shift_mu=1.609)
         self.action_shift = 5.0
@@ -111,13 +120,19 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
         device: Union[str, torch.device] = "cuda",
         dit = None,
         vae_path = None,
-        text_encoder_config=dict(),
+        text_encoder_config=None,
         vram_management_enabled = False,
         parallel_mode = None,
     ):
         # ***********************************************************
         # Initialize pipeline
-        pipe = KairosEmbodiedWAMPipeline(device=device, torch_dtype=torch_dtype, text_encoder_config = text_encoder_config)
+        text_encoder_config = copy.deepcopy(text_encoder_config or {})
+        pipe = KairosEmbodiedWAMPipeline(
+            device=device,
+            torch_dtype=torch_dtype,
+            vram_management_enabled=vram_management_enabled,
+            text_encoder_config=text_encoder_config,
+        )
 
         # ***********************************************************
         # load text_encoder
@@ -172,6 +187,124 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
 
         print(f'loading KairosEmbodiedWAMPipeline done .')
         return pipe
+
+    def training_loss(
+        self,
+        dit=None,
+        input_latents=None,
+        noise=None,
+        context=None,
+        context_mask=None,
+        first_frame_latents=None,
+        fuse_vae_embedding_in_latents=False,
+        min_timestep_boundary=0.0,
+        max_timestep_boundary=1.0,
+        use_gradient_checkpointing=True,
+        use_gradient_checkpointing_offload=False,
+        gradient_checkpointing_level="block",
+        **inputs,
+    ):
+        """Compute the Flow Matching loss for a training video batch."""
+        if dit is None:
+            dit = self.dit
+        if dit is None or not hasattr(dit, "video_dit"):
+            raise TypeError("training_loss requires dit.video_dit")
+        if input_latents is None or noise is None:
+            raise ValueError("training_loss requires input_latents and noise")
+        if context is None:
+            raise ValueError("training_loss requires encoded context")
+        if input_latents.ndim != 5 or noise.shape != input_latents.shape:
+            raise ValueError(
+                "input_latents and noise must have the same BCTHW shape"
+            )
+        if context.shape[0] != input_latents.shape[0]:
+            raise ValueError("context and latent batch sizes differ")
+
+        use_gradient_checkpointing = bool(use_gradient_checkpointing)
+        use_gradient_checkpointing_offload = bool(use_gradient_checkpointing_offload)
+        gradient_checkpointing_level = str(gradient_checkpointing_level)
+        min_timestep_boundary = float(min_timestep_boundary)
+        max_timestep_boundary = float(max_timestep_boundary)
+        if gradient_checkpointing_level not in ("block", "op"):
+            raise ValueError("gradient_checkpointing_level must be 'block' or 'op'")
+        if not 0.0 <= min_timestep_boundary < max_timestep_boundary <= 1.0:
+            raise ValueError("invalid timestep boundaries")
+
+        latent_b, latent_c, latent_t, latent_h, latent_w = input_latents.shape
+        if first_frame_latents is not None:
+            expected = (latent_b, latent_c, latent_h, latent_w)
+            actual = (
+                first_frame_latents.shape[0],
+                first_frame_latents.shape[1],
+                first_frame_latents.shape[3],
+                first_frame_latents.shape[4],
+            ) if first_frame_latents.ndim == 5 else None
+            if actual != expected:
+                raise ValueError(
+                    "first_frame_latents must match latent batch/channel/spatial shape"
+                )
+            if not 0 < first_frame_latents.shape[2] < latent_t:
+                raise ValueError(
+                    "first_frame_latents must contain fewer frames than input_latents"
+                )
+        patch_size = getattr(dit.video_dit, "patch_size", (1, 2, 2))
+        patch_h, patch_w = int(patch_size[-2]), int(patch_size[-1])
+        dynamic_shift_len = ((latent_h + patch_h - 1) // patch_h) * (
+            (latent_w + patch_w - 1) // patch_w
+        )
+        self.scheduler.set_timesteps(
+            self.scheduler.num_train_timesteps,
+            training=True,
+            dynamic_shift_len=dynamic_shift_len,
+            num_frames=latent_t,
+        )
+
+        min_id = int(min_timestep_boundary * self.scheduler.num_train_timesteps)
+        max_id = int(max_timestep_boundary * self.scheduler.num_train_timesteps)
+        max_id = min(
+            self.scheduler.num_train_timesteps,
+            max(max_id, min_id + 1),
+        )
+        timestep_id = torch.randint(min_id, max_id, (1,), device="cpu")
+        timestep = self.scheduler.timesteps[timestep_id].to(
+            device=input_latents.device, dtype=input_latents.dtype
+        )
+        latents = self.scheduler.add_noise(input_latents, noise, timestep)
+        if first_frame_latents is not None:
+            history_t = first_frame_latents.shape[2]
+            latents = latents.clone()
+            latents[:, :, :history_t] = first_frame_latents
+
+        pred_video, _ = self.model_fn(
+            dit=dit,
+            latents=latents,
+            timestep=timestep,
+            context=context,
+            context_mask=context_mask,
+            first_frame_latents=first_frame_latents,
+            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            gradient_checkpointing_level=gradient_checkpointing_level,
+        )
+        target = self.scheduler.training_target(input_latents, noise, timestep)
+        if pred_video.shape != target.shape:
+            raise RuntimeError(
+                f"video prediction shape {pred_video.shape} does not match "
+                f"target shape {target.shape}"
+            )
+        if first_frame_latents is not None:
+            history_t = first_frame_latents.shape[2]
+            pred_video = pred_video[:, :, history_t:].contiguous()
+            target = target[:, :, history_t:].contiguous()
+        loss = torch.nn.functional.mse_loss(
+            pred_video.float(), target.float(), reduction="mean"
+        )
+        weight = self.scheduler.training_weight(timestep).to(
+            device=loss.device, dtype=loss.dtype
+        )
+        return loss * weight * self.loss_video_alpha
+
 
     def _solver_step(self, base_scheduler, solver_scheduler, model_output, progress_id, sample):
         if solver_scheduler is None:
@@ -800,7 +933,7 @@ class WanVideoUnit_NoiseInitializer(PipelineUnit):
         if vace_reference_image is not None:
             noise = torch.concat((noise[:, :, -1:], noise[:, :, :-1]), dim=2)
 
-        if robot_action_horizon is not None:
+        if robot_action_horizon is not None and hasattr(pipe.dit, "action_dit"):
             shape = [batch_size, robot_action_horizon, pipe.dit.action_dit.action_dim]
             noise_action = pipe.generate_noise(shape, seed=seed, rand_device=rand_device)
             return {"noise": noise, "noise_action": noise_action}
@@ -1516,7 +1649,7 @@ def model_fn_wan_video(
         num_history_frames = 0
 
     if timestep_action is None:
-        # video only forward
+        # video forward
 
         attention_mask_d = build_mot_attention_mask_info_dict_wrapper(
             video_seq_len=video_seq_len,
@@ -1545,7 +1678,7 @@ def model_fn_wan_video(
             attention_mask_d=attention_mask_d,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            gradient_checkpointing_level='block',
+            gradient_checkpointing_level=gradient_checkpointing_level,
         )
 
         pred_action = None
@@ -1591,6 +1724,6 @@ def model_fn_wan_video(
 
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            gradient_checkpointing_level='block',
+            gradient_checkpointing_level=gradient_checkpointing_level,
         )
     return pred_video, pred_action

@@ -319,6 +319,27 @@ We provide benchmark-specific instructions and evaluation scripts for the follow
 | RoboTwin 2.0 | Dual-arm manipulation benchmark for evaluating long-horizon embodied control and action prediction. | [benchmarks/robotwin](benchmarks/robotwin/README.md)       |
 | LIBERO-Plus  | Long-horizon manipulation benchmark for evaluating generalization across tasks and scenes.          | [benchmarks/libero_plus](benchmarks/libero_plus/README.md) |
 
+### 6.5 Kairos Training
+
+Kairos training uses Flow Matching with local JSONL video manifests and one
+target output shape per run. The default recipe samples videos to 832x480, 81
+frames, and 16 FPS, resizing and temporally resampling source clips as needed.
+The default ``trainable_models`` selection is ``dit.video_dit``, and EMA is not
+applied.
+
+Install the optional dependencies and launch the one-GPU default:
+
+    pip install -r requirements-train.txt
+    bash examples/train_kairos.sh
+
+Use NUM_PROCESSES to enable the included DeepSpeed ZeRO-1 launcher:
+
+    NUM_PROCESSES=8 bash examples/train_kairos.sh
+
+The configurable conditions are t2v, ti2v, i2v, and null2v. See
+[docs/TRAINING.md](docs/TRAINING.md) for the manifest schema, model paths,
+training arguments, condition probabilities, and checkpoint resume behavior.
+
 ## 👥 7. About Us
 Developed and maintained by the Kairos Team. We specialize in Embodied Intelligence and World Model research, with a mission to build Artificial General Intelligence (AGI) that truly understands the physical world. Our goal is to accelerate the industrialization of embodied technologies and reshape the global landscape of AI competition.
 ## 📄 8. License
@@ -345,7 +366,5 @@ We would like to thank the contributors to [Qwen-Image](https://huggingface.co/Q
 
 ---
 ⭐ Star us on GitHub if you find [Kairos](https://github.com/kairos-agi/kairos-sensenova) helpful!
-
-
 
 

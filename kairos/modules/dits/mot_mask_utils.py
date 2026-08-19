@@ -94,7 +94,7 @@ def _build_mot_mask_mod(
         aa_visible = q_is_action & kv_is_action
 
         # -------------------------
-        # case 3: action -> history video only
+        # case 3: action -> history video tokens
         # -------------------------
         av_visible = q_is_action & kv_is_video & kv_is_history_video
 
