@@ -186,6 +186,19 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
         ).prev_sample
         return prev_sample.to(dtype=sample.dtype)
 
+    @staticmethod
+    def _get_conditioning(inputs_shared, inputs_posi, cfg_merge, batch_size=None):
+        if not cfg_merge:
+            return inputs_posi["context"], inputs_posi["context_mask"]
+
+        context = inputs_shared["context"]
+        context_mask = inputs_shared.get("context_mask")
+        if batch_size is not None:
+            context = context[:batch_size]
+            if context_mask is not None:
+                context_mask = context_mask[:batch_size]
+        return context, context_mask
+
     @torch.no_grad()
     def infer_video_action_joint(
         self, 
@@ -234,6 +247,14 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
         # Denoise
         self.load_models_to_device(self.in_iteration_models)
         models = {name: getattr(self, name) for name in self.in_iteration_models}
+        context, context_mask = self._get_conditioning(
+            inputs_shared,
+            inputs_posi,
+            cfg_merge,
+            batch_size=(
+                inputs_shared["latents"].shape[0] if cfg_scale == 1.0 else None
+            ),
+        )
 
         assert len(self.scheduler.timesteps) == len(self.scheduler_action.timesteps)
 
@@ -248,8 +269,8 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
                 video_dit=self.dit.video_dit,
                 action_dit=self.dit.action_dit,
                 
-                context=inputs_posi["context"],
-                context_mask=inputs_posi["context_mask"],
+                context=context,
+                context_mask=context_mask,
                 attention_mask_d=attention_mask_d,
 
                 latents=inputs_shared["latents"],
@@ -264,6 +285,8 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
             if cfg_scale != 1.0:
                 if cfg_merge:
                     noise_pred_posi, noise_pred_nega = noise_pred_posi.chunk(2, dim=0)
+                    # The unmerged path predicts actions from positive conditioning only.
+                    noise_pred_action_posi = noise_pred_action_posi.chunk(2, dim=0)[0]
                 else:
                     noise_pred_nega =mot_infer_pure_video_dit_once(
                         video_dit=self.dit.video_dit,
@@ -360,6 +383,14 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
         # Denoise
         self.load_models_to_device(self.in_iteration_models)
         models = {name: getattr(self, name) for name in self.in_iteration_models}
+        context, context_mask = self._get_conditioning(
+            inputs_shared,
+            inputs_posi,
+            cfg_merge,
+            batch_size=(
+                inputs_shared["latents"].shape[0] if cfg_scale == 1.0 else None
+            ),
+        )
         for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
             # Switch DiT if necessary
             if timestep.item() < switch_DiT_boundary * self.scheduler.num_train_timesteps and self.dit2 is not None and not models["dit"] is self.dit2:
@@ -376,8 +407,8 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
                 first_frame_latents=inputs_shared.get("first_frame_latents", None),
                 fuse_vae_embedding_in_latents=inputs_shared.get("fuse_vae_embedding_in_latents", False),
                 timestep = timestep,
-                context=inputs_posi["context"],
-                context_mask=inputs_posi["context_mask"],
+                context=context,
+                context_mask=context_mask,
                 attention_mask_d=attention_mask_d,
             )
             if cfg_scale != 1.0:
@@ -431,8 +462,15 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
         switch_DiT_boundary,
         progress_bar_cmd,
         solver_action=None,
+        cfg_merge=False,
     ):
         latents_action = inputs_shared['noise_action']
+        context, context_mask = self._get_conditioning(
+            inputs_shared,
+            inputs_posi,
+            cfg_merge,
+            batch_size=latents_action.shape[0],
+        )
 
         first_frame_latents = inputs_shared["first_frame_latents"]
 
@@ -443,8 +481,8 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
         video_pre = mot_pre_video_dit(dit=self.dit.video_dit,
                         first_frame_latents=first_frame_latents,
                         latents=inputs_shared["latents"], 
-                        context=inputs_posi["context"], 
-                        context_mask=inputs_posi["context_mask"],
+                        context=context,
+                        context_mask=context_mask,
                         fuse_vae_embedding_in_latents=inputs_shared["fuse_vae_embedding_in_latents"]
                         )
 
@@ -513,8 +551,8 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
                 action_dit=self.dit.action_dit,
                 latents_action=latents_action,
                 timestep_action=timestep_action,
-                context=inputs_posi['context'],
-                context_mask=inputs_posi['context_mask'],
+                context=context,
+                context_mask=context_mask,
                 attention_mask_d=attention_mask_d,
                 video_kv_cache=video_kv_cache,
                 video_seq_len=video_seq_len,
@@ -706,6 +744,7 @@ class KairosEmbodiedWAMPipeline(BasePipeline):
                 switch_DiT_boundary,
                 progress_bar_cmd,
                 solver_action=solver_action,
+                cfg_merge=cfg_merge,
             )
         elif wam_infer_mode == "video":
             return self.infer_video(
@@ -1236,7 +1275,13 @@ class WanVideoUnit_TeaCache(PipelineUnit):
 class WanVideoUnit_CfgMerger(PipelineUnit):
     def __init__(self):
         super().__init__(take_over=True)
-        self.concat_tensor_names = ["context", "clip_feature", "y", "reference_latents"]
+        self.concat_tensor_names = [
+            "context",
+            "context_mask",
+            "clip_feature",
+            "y",
+            "reference_latents",
+        ]
 
     def process(self, pipe: KairosEmbodiedWAMPipeline, inputs_shared, inputs_posi, inputs_nega):
         if not inputs_shared["cfg_merge"]:
