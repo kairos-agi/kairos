@@ -1,0 +1,6 @@
+# Includes the inference dependencies plus the optional training packages.
+-r requirements.txt
+accelerate>=1.2.0
+deepspeed>=0.15.0
+av==16.0.1
+safetensors>=0.4.5

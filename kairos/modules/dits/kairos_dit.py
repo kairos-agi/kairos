@@ -378,7 +378,7 @@ class SelfAttention(nn.Module):
             q = rearrange(q, "b (n d l) c -> (b d) (n l) c", l=L, d=dilated_length)
             k = rearrange(k, "b (n d l) c -> (b d) (n l) c", l=L, d=dilated_length)
             v = rearrange(v, "b (n d l) c -> (b d) (n l) c", l=L, d=dilated_length)
-            x = self.attn(q, k, v, window_size=(L*self.window_size, L*self.window_size))
+        x = self.attn(q, k, v, window_size=(L*self.window_size, L*self.window_size))
 
         out = self.o(x)
         if use_dilated:

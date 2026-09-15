@@ -1,0 +1,44 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+deepspeed_config:
+  bf16:
+    enabled: true
+
+  zero_optimization:
+    stage: 1
+    overlap_comm: true
+    contiguous_gradients: true
+    # 推荐值（bf16 下约 95 MB / bucket）
+    reduce_bucket_size:      50000000      # ≈ 95 MB
+    allgather_bucket_size:   50000000      # 也设 50M，行为更统一
+    prefetch_bucket_size:    50000000
+    # sub_group_size: 1000000000     # effectively disable sub-grouping unless needed
+
+    zero_reduce_scatter: true
+
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: false
+    contiguous_memory_optimization: true
+    number_checkpoints: 1
+
+  deepspeed_multinode_launcher: standard
+  gradient_accumulation_steps: 1
+  gradient_clipping: 1.0
+  offload_optimizer_device: none
+  offload_param_device: none
+  zero3_init_flag: false
+  zero_stage: 1
+  wall_clock_breakdown: true
+  
+distributed_type: DEEPSPEED
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+main_training_function: main
+mixed_precision: bf16
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

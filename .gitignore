@@ -131,3 +131,8 @@ workdir/
 workdirs/
 work_dirs/
 checkpoints/
+models/
+runs/
+wandb/
+data_cache/
+*.safetensors
